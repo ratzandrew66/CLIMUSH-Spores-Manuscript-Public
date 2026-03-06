@@ -1,0 +1,1273 @@
+---
+title: "Climush_Manuscript"
+author: "Andrew Ratz"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(vegan)
+```
+
+
+```{r Bringing in dataframes}
+dat <- read.csv("dat.csv")
+
+#Fixing some missing dates, assuming they were left out for the same time as the other DSW samples
+ dat <- dat %>%
+   mutate(Nr.days.out = case_when(is.na(Nr.days.out) ~ 31, TRUE ~ Nr.days.out))
+
+macro.data.long <- read.csv("macro_long.csv")
+```
+
+
+```{r Initial OTU and qPCR Summaries}
+
+#3216 OTUs in total
+macro.data.long %>% distinct(OTU)
+
+#2169/3216 (67.4%) OTUs have genus distinctions above the 80% bootstrap
+macro.data.long %>% distinct(OTU, Genus_80) %>% filter(!is.na(Genus_80) & !str_detect("_sedis", Genus_80))
+
+#2329/3216 (72.4%) of all OTUs are seen in one ecoregion
+macro.data.long%>% distinct(OTU, ecoregion) %>% group_by(OTU) %>% summarize(n = n()) %>% filter(n <= 1)
+
+#1148/3216 (35.7%) of all OTUs are seen in one sample
+macro.data.long%>%group_by(OTU)%>%summarise(n_samples = n())%>%filter(n_samples <= 1)
+
+#total qPCR abundance by ecoregion
+dat %>% group_by(ecoregion) %>% summarise(total_abund = sum(copy_number), mean_abund = mean(copy_number)) %>% arrange(total_abund)
+
+#corrected qPCR abundance
+dat %>% filter(!is.na(Nr.days.out)) %>% mutate(copies_per_day = copy_number/Nr.days.out)%>%group_by(ecoregion)%>%summarise(mean_daily_abund = mean(copies_per_day)) %>% arrange(mean_daily_abund)
+
+```
+
+```{r Fig 1a - Div ~ Ecoregion}
+
+library(viridis)
+
+#---- 1a - Log Daily Abundance ~ Ecoregion ----
+dat.1a <- dat%>% mutate(daily.abund = log(copy_number)/Nr.days.out) %>% filter(!is.na(daily.abund))
+
+dat.1a%>%
+mutate(ecoregion = fct_reorder(ecoregion, desc(daily.abund), .fun = mean))%>%
+ggplot(aes(x = ecoregion, y = daily.abund))+
+  geom_violin(aes(fill = fct_relevel(ecoregion, c("SE",  "NE", "PNW", "SROC", "GRTL","TAIG",'DSW','PRAI'))),scale = "width", alpha = 0.8)+
+  scale_fill_viridis(discrete = TRUE)+
+  stat_summary(fun = "mean", geom = "crossbar", color = "black", width = 0.5)+
+  #geom_text(data = Tk, aes(x = ecoregion, y = quant, label = cld), vjust = -1, hjust = -1, size = 4)+
+  scale_y_continuous(limits = c(0,2.0))+
+  labs(y = "Log Daily Abundance",x = "", fill = "")+
+  theme_minimal()+ 
+    theme(legend.key.size = unit(1.2, "cm"),
+          legend.text = element_text(size = 12))
+
+#----Testing significance 1a.1 ----
+
+#first, does our data fit assumptions for an ANOVA
+aov.1a <- aov(daily.abund ~ ecoregion, data = dat.1a)
+shapiro.test(residuals(aov.1a)) # p << 0.001
+bartlett.test(daily.abund ~ ecoregion, data = dat.1a) # p << 0.001
+#no it doesn't so we will have to use a Kruskal-Wallis going forward
+
+kw <- kruskal.test(daily.abund ~ ecoregion, data = dat.1a)
+kw$p.value # p <<< 0.001
+
+#Post-Hoc test for Kruskal = Dunn test
+library(FSA)
+dunn <- dunnTest(daily.abund ~ ecoregion, data = dat.1a, method = "bh") 
+
+#Benjamini-Hochberg corrected p-value (semi-conservative)
+library(multcompView) #getting letters automatically
+p <- dunn$res$P.adj
+names(p) <- gsub(" ","", dunn$res$Comparison)
+letters <- multcompLetters(p, threshold = 0.05)
+view(letters$Letters)
+
+
+# 1a.2 - OTU Richness ~ Ecoregion ----
+
+#total richness by ecoregion
+dat%>% group_by(ecoregion) %>% summarise(T_rich = sum(Sobs))
+macro.data.long%>%  group_by(ecoregion)%>%distinct(OTU)%>%summarise(n = n())
+#graphing Daily OTU Richness
+dat%>%
+mutate(ecoregion = fct_reorder(ecoregion, desc(Sobs/Nr.days.out), .fun = mean))%>%
+  filter(!is.na(Nr.days.out))%>%
+ggplot(aes(x = ecoregion, y = Sobs/Nr.days.out))+
+  geom_violin(aes(fill = fct_relevel(ecoregion, c("SE",  "NE", "PNW", "SROC", "GRTL","TAIG",'DSW','PRAI'))),scale = "width", alpha = 0.8)+
+  scale_fill_viridis(discrete = TRUE)+
+  stat_summary(fun = "mean", geom = "crossbar", color = "black", width = 0.5)+
+  scale_y_continuous(limits = c(0,10.5))+
+  labs(y = "Daily OTU richness",x = "", fill = "")+
+  theme_minimal()+ 
+    theme(legend.key.size = unit(1.2, "cm"),
+          legend.text = element_text(size = 12))
+
+# Significance of 1a.2 ----
+kw <- kruskal.test((Sobs/Nr.days.out) ~ ecoregion, data = dat.1a)
+kw$p.value # p <<< 0.001
+kw$statistic
+#Post-Hoc test for Kruskal = Dunn test
+dunn <- dunnTest((Sobs/Nr.days.out) ~ ecoregion, data = dat.1a, method = "bh") 
+#Benjamini-Hochberg corrected p-value (semi-conservative)
+#getting letters automatically
+p <- dunn$res$P.adj
+names(p) <- gsub(" ","", dunn$res$Comparison)
+letters <- multcompLetters(p, threshold = 0.05)
+view(letters$Letters)
+
+
+
+```
+
+```{r Fig 1b - Div by Only Habitat}
+dat.1c <- dat.1a%>%
+   mutate(habitat = gsub("conifers", "Conifer", habitat))%>%
+    mutate(habitat = gsub("oaks", "Oak", habitat))%>%
+    mutate(habitat = gsub("grassland", "Grass", habitat))%>%
+  mutate(habitat = fct_reorder(habitat, desc(daily.abund), .fun = mean))
+
+# 1b - Daily Abund ~ Habitat ----
+ggplot(dat.1c, aes(x = habitat,y = daily.abund))+
+  geom_violin(aes(fill = habitat), scale = "width", alpha = 0.8)+
+  scale_fill_manual(values = alpha(c("#51939e","#c54460","#ffc266"),0.8))+
+  stat_summary(fun = "mean", geom = "crossbar", color = "black", width = 0.5)+
+  #facet_wrap(~ecoregion, nrow = 2)+
+  labs(y = "Log Daily Abundance", x = "", fill = "")+
+  theme_minimal()+
+  scale_y_continuous(limits = c(0,2))+
+  theme(legend.key.size = unit(1.2, "cm"),
+          legend.text = element_text(size = 12))
+
+##Testing significance 1b.1 ----
+
+#first, does our data fit assumptions for an ANOVA
+aov <- aov(daily.abund ~ habitat, data = dat.1c)
+shapiro.test(residuals(aov)) # p << 0.001
+bartlett.test(daily.abund ~ habitat, data = dat.1c) # p << 0.001
+#no it doesn't so we will have to use a Kruskal-Wallis going forward
+
+kw <- kruskal.test(daily.abund ~ habitat, data = dat.1c)
+kw$p.value # p <<< 0.001
+
+# Log-transform to handle the high-abundance "outlier" and stabilize variance
+m1 <- lmer(Sobs/Nr.days.out ~ habitat + (1 | ecoregion), data = dat.1c)
+
+# Check results
+summary(m1)
+anova(m1) # Gives you the overall "habitat" significance
+
+#Post-Hoc test for Kruskal = Dunn test
+dunn <- dunnTest(daily.abund ~ habitat, data = dat.1c, method = "bh") 
+#Benjamini-Hochberg corrected p-value (semi-conservative)
+#getting letters automatically
+p <- dunn$res$P.adj
+names(p) <- gsub(" ","", dunn$res$Comparison)
+letters <- multcompLetters(p, threshold = 0.05)
+print(letters$Letters)
+
+#one ecoregion at a time when only 2 habitats
+wilcox.test(Sobs/Nr.days.out ~ burn_history, data = dat.1c[dat.1c$ecoregion == "TAIG",])
+
+#1b - Daily OTU Richness ~ Habitat ----
+ggplot(dat.1c, aes(x = habitat, y = Sobs/Nr.days.out))+
+  geom_violin(aes(fill = habitat), scale = "width", alpha = 0.8)+
+  scale_fill_manual(values = alpha(c("#51939e","#c54460","#ffc266"),0.8))+
+  stat_summary(fun = "mean", geom = "crossbar", color = "black", width = 0.5)+
+  facet_wrap(~ecoregion, nrow = 2)+
+  scale_y_continuous(limits = c(0,20))+
+  labs(y = "Daily OTU Richness", x = "", fill = "")+
+  theme_minimal()+
+  theme(legend.key.size = unit(1.2, "cm"),
+          legend.text = element_text(size = 12))
+
+##----Testing significance 1b.2 ----
+kw <- kruskal.test(Sobs/Nr.days.out ~ habitat, data = dat.1c)
+kw$p.value # p <<< 0.001
+kw$statistic
+#Post-Hoc test for Kruskal = Dunn test
+dunn <- dunnTest((Sobs/Nr.days.out) ~ habitat, data = dat.1c, method = "bh") 
+#Benjamini-Hochberg corrected p-value (semi-conservative)
+#getting letters automatically
+p <- dunn$res$P.adj
+names(p) <- gsub(" ","", dunn$res$Comparison)
+letters <- multcompLetters(p, threshold = 0.05)
+print(letters$Letters)
+
+```
+
+```{r Fig 1c - Div by only Burn}
+
+# 1c - Daily Abundance ~ Burn ----
+dat.1c%>%
+  mutate(burn_history = fct_reorder(burn_history, desc(Sobs/Nr.days.out)))%>%
+  mutate( burn_history = gsub("burned", "Burned", burn_history),
+          burn_history = gsub("unBurned", "Unburned", burn_history))%>%
+ggplot(aes(x = burn_history, y = daily.abund))+
+  geom_violin(aes(fill = 
+                    fct_relevel(burn_history, c("burned","unburned"))))+
+  stat_summary(fun = "median", geom = "crossbar", color = "black", width = 0.5)+
+  scale_fill_manual(values = alpha(c("goldenrod3","grey"), 0.9))+
+  theme_minimal()+
+  scale_y_continuous(limits = c(0,2))+
+  facet_wrap(~ecoregion, nrow = 2)+
+    theme(legend.key.size = unit(1, "cm"),
+          legend.text = element_text(size = 12))+
+  labs(title = "", x = "", y = "Log Daily Abundance", fill = "" )
+
+#can use a linear model instead of a t.test for diagnosis
+lm <- lm(daily.abund ~ burn_history, data = dat.1c)
+shapiro.test(residuals(lm)) # p << 0.001
+
+#a non-parametric version of the t.test it seems
+wilcox.test(daily.abund ~ burn_history, data = dat.1c)
+#p > 0.9
+
+#one ecoregion at a time
+wilcox.test(daily.abund ~ burn_history, data = dat.1c[dat.1c$ecoregion == "TAIG",])
+
+# 1c - Daily Richness ~ Burn ----
+dat.1c%>%
+  mutate(burn_history = fct_reorder(burn_history, desc(Sobs/Nr.days.out)))%>%
+  mutate( burn_history = gsub("burned", "Burned", burn_history),
+          burn_history = gsub("unBurned", "Unburned", burn_history))%>%
+ggplot(aes(x = burn_history, y = Sobs/Nr.days.out))+
+  geom_violin(aes(fill = 
+                    fct_relevel(burn_history, c("Burned","Unburned"))))+
+  stat_summary(fun = "median", geom = "crossbar", color = "black", width = 0.5)+
+  scale_fill_manual(values = alpha(c("goldenrod3","grey"), 0.9))+
+  scale_y_continuous(limits = c(0,20))+
+  theme_minimal()+
+  facet_wrap(~ecoregion, nrow = 2)+
+    theme(legend.key.size = unit(1, "cm"),
+          legend.text = element_text(size = 12))+
+  labs(title = "", x = "", y = "Daily OTU Richness", fill = "" )
+
+
+#can use a linear model instead of a t.test for diagnosis
+lm <- lm((Sobs/Nr.days.out) ~ burn_history, data = dat.1c)
+shapiro.test(residuals(lm)) # p << 0.001
+
+#a non-parametric version of the t.test it seems
+wilcox.test((Sobs/Nr.days.out) ~ burn_history, data = dat.1c)
+#p = 0.082, nearly sig but not quite!
+
+#one ecoregion at a time
+wilcox.test(Sobs/Nr.days.out ~ burn_history, data = dat.1c[dat.1c$ecoregion == "TAIG",])
+```
+
+```{r Fig 2 - Climatic Mixed effect models}
+
+#need to scale temp and precip to make them more even in terms of 'weight'
+dat_scaled <- dat%>% filter(!is.na(MMT))%>%
+  mutate(MMT_scaled = scale(MMT)) %>%
+  mutate(MMP_scaled = scale(MMP_mm))%>%
+  mutate(MAT_scaled = scale(MAT)) %>%
+  mutate(MAP_scaled = scale(MAP_mm))
+
+library(lme4)
+library(lmerTest)
+# Richness ~ climate ----
+#testing a full model
+rich_full <- lmer((Sobs/Nr.days.out) ~ MAP_scaled * MAT_scaled + (1| ecoregion/subplot), data = dat_scaled, REML = FALSE)
+
+plot(rich_full)
+#residuals are wider on the right, lets try log(Sobs/Nr.days.out)
+
+rich_full2 <- lmer(log(Sobs/Nr.days.out) ~ MAP_scaled * MAT_scaled + (1| ecoregion/subplot), data = dat_scaled, REML = FALSE)
+plot(rich_full2) #much better
+
+
+#only annual climate
+rich_annual <- lmer(log(Sobs/Nr.days.out) ~ MAP_scaled * MAT_scaled + (1| ecoregion/subplot), 
+                  data = dat_scaled, REML = FALSE)
+
+#Only monthly climate
+rich_monthly <- lmer(log(Sobs/Nr.days.out) ~ MMP_scaled * MMT_scaled + (1| ecoregion/subplot), 
+                  data = dat_scaled, REML = FALSE)
+
+#allowing for some 2-way interaction
+rich_combined_simple <- lmer(log(Sobs/Nr.days.out) ~ MMP_scaled + MMT_scaled + MAT_scaled + MAP_scaled + 
+                        (1| ecoregion/subplot), data = dat_scaled, REML = TRUE)
+
+rich_combined <- lmer(log(Sobs/Nr.days.out) ~ 
+                               (MMP_scaled + MMT_scaled + MAT_scaled + MAP_scaled)^2 + 
+                        (1| ecoregion/subplot), data = dat_scaled, REML = TRUE)
+
+
+anova(rich_annual,rich_monthly,rich_combined, rich_combined_simple)
+
+#combined model is a winner
+#p  << 0.01, AIC much lower
+
+summary(rich_combined)
+#MMP - p =  0.028, slope = 0.18, Std error = 0.08, df = 650.78, test stat = 2.2
+#MAT - P << 0.01, slope = 1.15, Std error = 0.22, df = 112.5, test stat = 5.1
+#MAP and MMT have a significant interaction (<<0.001), along with MMMP and MAT ( = 0.03)
+#report like: (Beta = B +/- Std. Error, t(df) = t, p = p)
+
+#Now I want the R-squared for the model to let me know a little about that is going on
+library(MuMIn)
+r.squaredGLMM(rich_combined)
+#R2m = 0.291 - fixed effects explain ~ 29%
+#R2c = 0.859 - entire model ~ 86%, most variance explained by ecoregion identity
+
+#plotting simple linear models just for data visualization
+ggplot(dat, aes(x = MAT, y = Sobs/Nr.days.out))+
+  geom_jitter(width = 0.8)+
+  geom_smooth(method = 'lm')+
+  labs(x = "Mean Annual Temperature", y = "Daily Richness")+
+  scale_y_continuous(limits = c(0,15))+
+  theme_classic()+
+  theme(axis.title = element_text(size = 16))
+  
+
+ggplot(dat, aes(x = MMP_mm/10, y = Sobs/Nr.days.out))+
+  geom_jitter(width = 0.5)+
+  geom_smooth(method = 'lm', linetype = 'dashed')+
+  labs(x = "Mean Monthly Precipitation (cm)", y = "Daily Richness")+
+  scale_y_continuous(limits = c(0,15))+
+  theme_classic()+
+  theme(axis.title = element_text(size = 16))
+
+# Abundance ~ Climate ----
+abund_full <- lmer(log(copy_number)/Nr.days.out ~ MMP_scaled * MMT_scaled + year + (1| ecoregion/subplot), 
+                  data = dat_scaled, REML = FALSE)
+plot(abund_full) #likely okay here but a bit sketchy
+
+#only annual climate
+abund_annual <- lmer(log(copy_number)/Nr.days.out ~ MAP_scaled * MAT_scaled + year + 
+                       (1| ecoregion/subplot), data = dat_scaled, REML = FALSE)
+
+#Only monthly climate
+abund_monthly <- lmer(log(copy_number)/Nr.days.out ~ MMP_scaled * MMT_scaled + year + 
+                        (1| ecoregion/subplot), data = dat_scaled, REML = FALSE)
+
+abund_monthly_add <- lmer(log(copy_number)/Nr.days.out ~ MMP_scaled + MMT_scaled + year + 
+                            (1| ecoregion/subplot), data = dat_scaled, REML = FALSE)
+
+abund_combined <- lmer(log(copy_number)/Nr.days.out ~ MMP_scaled + MMT_scaled + MAT_scaled + MAP_scaled 
+                       + year +  (1| ecoregion/subplot), data = dat_scaled, REML = FALSE)
+
+#looking at AIC
+anova(abund_combined,abund_annual,abund_monthly,abund_monthly_add)
+
+#looks like we are using the combined model for abundance
+# p = 0.0036, AIC is lowest, Chisq(1) = 3.52
+summary(abund_combined)
+#year - p = 0.0069
+#MMT - p << 0.001
+#MAP - p = 0.0058
+
+r.squaredGLMM(abund_combined)
+#R2m - 0.197 - abundance is less "explainable" by our measured variables
+#R2c = 0.285 - less controlled by ecoregion that OTU richness was, huh
+
+#plotting simple linear models just for data visualization
+ggplot(dat, aes(x = MMT, y = log(copy_number)/Nr.days.out))+
+  geom_jitter(width = 0.5)+
+  geom_smooth(method = 'lm')+
+  labs(x = "Mean Monthly Temperature", y = "Log Daily Abundance")+
+  scale_y_continuous(limits = c(0,1.5))+
+  theme_classic()+
+  theme(axis.title = element_text(size = 16))
+  
+
+ggplot(dat, aes(x = (MAP_mm)/10, y = log(copy_number)/Nr.days.out))+
+  geom_jitter(width = 5)+
+  geom_smooth(method = 'lm')+
+  labs(x = "Mean Annual Precipitation (cm)", y = "Log Daily Abundance")+
+  scale_y_continuous(limits = c(0,1.5))+
+  theme_classic()+
+  theme(axis.title = element_text(size = 16))
+
+
+```
+
+
+```{r Diversity ~ Season, sampling year, & Elevation}
+#testing whether I can just use a basic t-test
+lm <- lm(daily.abund ~ as.factor(year), data = dat.1a)
+shapiro.test(residuals(lm)) # p << 0.001, gotta use a non-parametric version
+
+#a non-parametric version of the t.test
+###by Year
+wilcox.test(daily.abund ~ as.factor(year), data = dat.1a) #p = 0.29
+
+wilcox.test(Sobs/Nr.days.out ~ as.factor(year), data = dat.1a)# p < 0.001
+plot(Sobs/Nr.days.out ~ as.factor(year), data = dat.1a)#2023 > 2022
+
+
+###by Season
+wilcox.test(daily.abund ~ as.factor(season), data = dat.1a) #p << 0.001
+plot(daily.abund ~ as.factor(season), data = dat.1a)#late season > early season (early a lot of outliers)
+
+wilcox.test(Sobs/Nr.days.out ~ as.factor(season), data = dat.1a)# p = 0.03
+plot(Sobs/Nr.days.out ~ as.factor(season), data = dat.1a)#late season > early season
+
+
+###by elevation
+ggplot(dat.1a, aes(x = log(Elevation.m), y = daily.abund))+
+  geom_jitter(aes(color = ecoregion), width = 0.01)
+
+#elevation may just be an ecoregion trend, lets see how correlated they are
+aov <- aov(Elevation.m ~ ecoregion, data = dat.1a)
+summary.lm(aov)$r.squared
+#R_squared = 0.84, they are likely more correlated so any trend we see is based on ecoregion
+#it is still interesting that the ecoregions / sites that are at high elevation tend to have lower abundance / richness but that is more due to ecoregion I think
+
+#I will add these to the mixed-effect models above and check significance instead of testing independently
+
+#If we take the previously best model, can we add year, elevation (scaled) and season to make it a better model
+dat_scaled <- dat_scaled %>%
+  mutate(Elev_scaled = scale(Elevation.m))
+
+
+temp <- lmer(log(copy_number)/Nr.days.out ~ MMP_scaled + MMT_scaled + MAT_scaled + MAP_scaled 
+                       + as.factor(year) + Elev_scaled + season + (1| ecoregion/subplot), data = dat_scaled, REML = FALSE)
+
+summary(temp)
+#Adding year, Elev, and season - Season is highly sig (p - 0.000398) but year and elevation are not significant
+#This means that the earlier signal from year was likely from climatic effects that overpower it (Hotter and wetter in 2023?)
+#The signal from elevation was likely due to an ecoregion effect that disappears once it becomes a random effect
+r.squaredGLMM(temp)
+#R2m = 0.212, R2c = 0.274
+
+
+#What about OTU richness?
+temp <- lmer(log(Sobs/Nr.days.out) ~ (MMP_scaled + MMT_scaled + MAT_scaled + MAP_scaled)^2 + 
+               as.factor(year) + season + Elev_scaled + 
+               (1| ecoregion/subplot), data = dat_scaled, REML = FALSE)
+
+summary(temp)
+#Adding in year, elevation, and season
+# MMP (0.005), MAT (<0.001), year (0.002), Elev (0.026), MMP:MAT (0.02), MMT:MAT (0.03), MMT:MAP (<0.001)
+#Year is significant for OTU richness
+#Elevation is sig (0.037) --> look more into --> is it just a proxy for habitat trends in PNW
+#Season is non-sig (p = 0.37)
+r.squaredGLMM(temp)
+#R2m = 0.241, R2c = 0.881
+dat_scaled %>%
+  filter(ecoregion == "TAIG")%>%
+  ggplot(aes(x = Elev_scaled, y = log(Sobs / Nr.days.out)))+
+  geom_point(aes(color = treatment))+
+  geom_smooth(method = 'lm')
+```
+
+```{r Climatic Models within ecoregions}
+dat_scaled_sing <- dat_scaled %>%
+  filter(ecoregion == "PNW")
+
+#Abundance
+abund.lm <- lmer(log(copy_number)/Nr.days.out ~ (MMP_scaled + MMT_scaled)^2
+                       + as.factor(year) + Elev_scaled + season + (1| treatment/subplot), data = dat_scaled_sing, REML = FALSE)
+
+summary(abund.lm)
+r.squaredGLMM(abund.lm)
+
+#Richness
+rich.lm <- lmer(log(Sobs/Nr.days.out) ~ (MMP_scaled + MMT_scaled)^2
+                       + as.factor(year) + Elev_scaled + season + (1| treatment/subplot), data = dat_scaled_sing, REML = FALSE)
+
+summary(rich.lm)
+r.squaredGLMM(rich.lm)
+```
+
+
+```{r Calculation of Bray-Curtis Matrix}
+#Load in the rarefied phyloseq object:
+df.rare<-readRDS("CLIMUSH.phylo.rare.otu.rds")
+df.rare
+
+OTU.df.rare<-df.rare@otu_table
+OTU.df.rare.t<-t(OTU.df.rare)
+OTU.df.rare.t <-as.matrix(OTU.df.rare.t) 
+
+macro_nmds_dat <- as.data.frame(OTU.df.rare.t) 
+
+#getting the list of Macro Fungi OTUs
+macro.otus <- as.list(unique(macro.data.long$OTU))
+
+#selecting only Macro Fungi
+macro_nmds_dat <- macro_nmds_dat[, names(macro_nmds_dat) %in% macro.otus]
+
+#fixing Odd Sample IDs
+macro_nmds_dat <- macro_nmds_dat %>%
+  rownames_to_column("Sample_ID")
+
+macro_nmds_dat <- macro_nmds_dat %>%
+  mutate(Sample_ID = str_replace_all(Sample_ID, "[.-]", "_"))%>%
+  mutate(Sample_ID = str_replace_all(Sample_ID, "_[^_]*$", ""))
+
+#outliers tested below,first run was without filtering then filtering was applied in a second run
+
+
+#joining
+macro_nmds_full <- dat%>%
+  left_join(macro_nmds_dat, by = 'Sample_ID', )%>% #joining
+  filter(!Sample_ID %in% c("illumina_spore_22_06_27_D06_UG_05_101","illumina_spore_22_03_26_D14_UG_02_52",
+                           "illumina_spore_23_03_16_D16_UG_05_150","illumina_spore_22_09_26_D06_BO_08_435",
+                           "illumina_spore_23_11_01_D20_BO_08_304","illumina_spore_22_10_26_D06_BO_02_455",
+                           "illumina_spore_23_11_01_D15_BG_08_299","illumina_spore_23_04_14_D16_BO_05_165",
+                           "illumina_spore_22_12_14_D03_BO_08_307"))
+
+
+ macro_nmds_clean <- 
+   macro_nmds_full %>%
+   dplyr::select(-c(1,3:51)) %>%
+   column_to_rownames('Sample_ID') %>%
+   drop_na()%>%
+  filter(rowSums(.[-1] != 0) > 0)  # Exclude rows where all non-ID columns are 0
+  
+#write.csv(macro_nmds_clean, "macro_nmds_clean.csv")
+   
+ temp.list <- as.list(rownames(macro_nmds_clean)) 
+
+  macro_nmds_metadata <- macro_nmds_full %>% #getting metadata
+   dplyr::select(c(2:51))%>%
+    filter(Sample_ID %in% temp.list)
+  
+# Calculating the Bray-Curtis Distance matrix ----
+
+dist <- vegdist(macro_nmds_clean, method = 'bray', data = macro_nmds_clean, na.rm = T)
+dist.mat <- as.matrix(dist)
+
+
+
+```
+
+
+```{r Bray ~ Haversine}
+
+#Pulling pairs for all of the traps to then calc distances
+dist.long <- dist.mat %>%
+  as.data.frame()%>%
+  rownames_to_column(var = "Trap1")%>%
+  pivot_longer(-Trap1, names_to = "Trap2", values_to = "Dissimilarity")%>%
+#Adding Lat/Long for trap 1 to calculate distances
+  left_join(dat[,c(2,23,24)], by = c("Trap1" = "Sample_ID"), multiple = "any", relationship = "many-to-many")%>%
+  rename("Lat1" = "Lat_dec","Long1" = "Long_dec")%>%
+#Adding the Lat/Long for the second trap
+  left_join(dat[,c(2,23,24)], by = c("Trap2" = "Sample_ID"), multiple = "any", relationship = "many-to-many")%>%
+  rename("Lat2" = "Lat_dec","Long2" = "Long_dec")
+
+library(geosphere)
+
+#Calculating the Haversine Distance and adding it to each point pair
+dist.long$haversine <- distHaversine(p1 = cbind(dist.long$Long1, dist.long$Lat1),
+                                           p2 = cbind(dist.long$Long2, dist.long$Lat2))
+
+#Continental scale lm
+summary(lm(Dissimilarity ~ log(haversine), data = dist.long[dist.long$haversine > 60000,]))
+
+#Between ecoregion lm
+summary(lm(Dissimilarity ~ log(haversine), data = dist.long[dist.long$haversine < 60000 & dist.long$haversine > 55,]))
+
+#Site-level lm
+summary(lm(Dissimilarity ~ log(haversine + 0.001), data = dist.long[dist.long$haversine < 55,]))
+
+#plotting Bray ~ Haversine
+dist.long %>%
+  mutate(haversine = log(haversine), haversine = case_when(haversine <0 ~ 0, TRUE ~ haversine))%>%
+ggplot(aes(x = haversine, y = Dissimilarity))+
+  geom_point()+  
+  #Linear model for all scales together
+  geom_smooth(method = 'lm', se = F, color = 'deepskyblue2')+
+  #Site-Level linear model results
+  geom_function(fun = function(x) 0.8402354 + 0.0067897*x, xlim = c(0,4), color = 'red', linewidth = 1)+
+  #Region-Level linear model results
+  geom_function(fun = function(x) 0.8689010 + 0.0042966*x, xlim = c(4,11), color = 'red', linewidth = 1)+
+  #Continent-Level linear model results
+  geom_function(fun = function(x) 0.8521 + 0.009374*x, xlim = c(13,16), color = 'red', linewidth = 1)+ 
+
+  #give the x-axis some space to breathe
+  scale_x_continuous(limits = c(-1,16))+
+  theme_classic()+
+   theme(axis.title = element_text(size = 14))+
+  labs(title = "", x = "Log Haversine Distance (m)", y = "Bray-Curtis Dissimilarity")
+
+
+```
+
+```{r Variance Partitioning}
+
+# Code to perform variance partitioning including geographic space on CLIMUSH spore community composition
+  #Subsetting to avoid the NA values for temp and precip
+clean.metadata <- macro_nmds_metadata[!is.na(macro_nmds_metadata$MMP_mm),]
+
+# Time Matrix 
+# Join OTU data with time properties
+time.matrix <- 
+  macro_nmds_clean %>%
+  rownames_to_column(var = "Sample_ID")%>%
+  right_join(clean.metadata, by = "Sample_ID")%>% 
+  # Convert SampleID to row names
+  column_to_rownames(var="Sample_ID")%>% 
+  # Select time variables
+  dplyr::select(nday, Nr.days.out, season, year)
+
+
+# Geographic matrix (lat long)
+# Join OTU data with coordinates
+geo.matrix <- macro_nmds_clean %>%
+  rownames_to_column(var = "Sample_ID")%>%
+  right_join(clean.metadata, by = "Sample_ID")%>% 
+  # Convert SampleID to row names
+  column_to_rownames(var="Sample_ID")%>% 
+  dplyr::select(Lat_dec, Long_dec, ecoregion, Elevation.m)
+
+#temperature
+temp.matrix <- macro_nmds_clean %>%
+  rownames_to_column(var = "Sample_ID")%>%
+  right_join(clean.metadata, by = "Sample_ID")%>% 
+  # Convert SampleID to row names
+  column_to_rownames(var="Sample_ID")%>% 
+  dplyr::select(MMT, MAT)
+
+#Precipitation
+precip.matrix <- macro_nmds_clean %>%
+  rownames_to_column(var = "Sample_ID")%>%
+  right_join(clean.metadata, by = "Sample_ID")%>%
+  # Convert SampleID to row names
+  column_to_rownames(var="Sample_ID")%>% 
+  dplyr::select(MMP_mm, MAP_mm)
+
+# Distance based matrix for fungal community composition (Bray-Curtis dissimilarity)
+dist.matrix <- vegdist(macro_nmds_clean[rownames(macro_nmds_clean) %in% clean.metadata$Sample_ID,], 
+                       method = 'bray', data = macro_nmds_clean, na.rm = T)
+
+#----#---- Variance Partitioning ----#
+
+
+# Constructing a spatial model using only the selected PCNM axes.
+geo.mod <- model.matrix(~ Lat_dec + Long_dec + Elevation.m + ecoregion, geo.matrix)[,-1]
+
+time.mod <- model.matrix(~ nday + Nr.days.out + season + year, time.matrix)[,-1]
+
+temp.mod <- model.matrix(~ MMT + MAT, temp.matrix)[,-1]
+  
+precip.mod <- model.matrix(~ MMP_mm + MAP_mm, precip.matrix)[,-1]
+
+# Conduct constrained ordinations (dbRDA) to assess the influence of each factor on fungal community composition.
+fun.tot.geo <- dbrda(dist.matrix ~ geo.mod) 
+fun.tot.time <- dbrda(dist.matrix ~ time.mod)
+fun.tot.temp <- dbrda(dist.matrix ~ temp.mod) 
+fun.tot.precip <- dbrda(dist.matrix ~ precip.mod)
+
+# Summarize the models.
+summary(fun.tot.geo)  
+summary(fun.tot.time) 
+summary(fun.tot.temp) 
+summary(fun.tot.precip) 
+
+
+# Test the significance of each constrained ordination using permutation tests.
+# This assesses whether each factor significantly explains variation in fungal community composition.
+set.seed(9) # Optional: Set a seed for reproducibility.
+permutest(fun.tot.geo, permutations=999) # Test significance of geographic effect
+permutest(fun.tot.time, permutations=999) # Test significance of temporal effect
+permutest(fun.tot.temp, permutations=999) # Test significance of temperature effect
+permutest(fun.tot.precip, permutations=999) # Test significance of precipitation effect
+
+
+#---- Variance Partitioning and Visualization ----#
+
+# Use the `varpart` function to partition the variance in fungal community composition among the different factors.
+# This determines how much of the variation is explained by each factor independently and in combination with others.
+
+# Partition variance between geography and soil.
+fun.varpart <- varpart(dist.matrix, as.data.frame(geo.mod), as.data.frame(time.mod), 
+                       as.data.frame(temp.mod), as.data.frame(precip.mod))
+
+# Display the results of the variance partitioning.
+summary(fun.varpart)
+
+# Plot a Venn diagram to visualize the partitioning of variance.
+plot(fun.varpart, digits = 3, Xnames = c("Geo","Time","Temp","Precip")) 
+
+#all groups
+
+
+
+#Manually turning it into a bar chart
+Var <-  c(0.1556, 0.0391, 0.057, 0.0318)
+Factor <-  c("Geography","Time","Temperature","Precipitation")
+temp.df <- data.frame(Factor, Var)
+
+temp.df <- temp.df %>%
+  mutate(Factor = fct_relevel(Factor, c("Geography","Temperature","Time","Precipitation")))
+
+ggplot(temp.df, aes(x = Factor, y = Var))+
+  geom_bar(stat = 'identity', fill = 'grey20')+
+  labs(x = "", y = "Proportion of Summed Variance")+
+  geom_text(aes(label = round(Var, 3)),  
+            vjust = -0.3,                
+            size = 7,                    
+            color = "black") +            
+  theme_classic()+
+  scale_y_continuous(limits = c(0,0.18))+
+  theme(axis.text = element_text(size = 14),
+        axis.title = element_text(size = 16))
+
+#Need to make cleaner here
+```
+
+```{r NMDS}
+## Running the NMDS ----
+nmds <- metaMDS(dist, distance = 'bray', k = 2, trymax = 20)
+nmds.df <- nmds %>%scores() %>%as_tibble(rownames = "Sample_ID")
+nmds.tot <- nmds.df%>% left_join(dat, by = "Sample_ID")%>%filter(!is.na(site))
+
+#Looking for outliers during initial run without filtering
+outliers <- nmds.tot%>% filter(!NMDS1 < 1 | !NMDS1 > -1 | !NMDS2 < 1 | !NMDS2 > -1)
+
+#Graphing
+
+#Centroids
+centroid <- nmds.tot%>%
+  filter(NMDS1 < 0.4 & NMDS1 > -1 & NMDS2 < 1.2 & NMDS2 > -0.6)%>%
+   group_by(ecoregion)%>%
+   summarise(NMDS1 = mean(NMDS1), NMDS2 = mean(NMDS2))
+ 
+
+ 
+ #scaling_factor <- 0.05 #adjust to needed
+library(viridis)
+#Ecoregion NMDS ----
+ #ecoregion_nmds  <-  
+   nmds.tot%>%
+   mutate(ecoregion = fct_relevel(ecoregion, c("SE","NE","PNW","SROC",
+                                              "GRTL","TAIG","DSW","PRAI")))%>%
+   ggplot(aes(x = NMDS1, y = NMDS2, color = ecoregion))+
+   geom_point(shape = 21, aes(color = ecoregion, fill = ecoregion), alpha = 0.5)+ #samples
+     geom_point(data = centroid, size = 6, color = 'black', shape = 21, aes(fill = ecoregion))+ #centroids
+  stat_ellipse(show.legend = F, geom = "polygon", aes(fill = ecoregion), alpha = 0.03)+ #conf intervals
+  scale_fill_viridis(discrete = T)+
+  scale_color_viridis(discrete = T)+
+  scale_y_continuous(limits = c(-0.5,0.5))+
+  scale_x_continuous(limits = c(-1,1))+
+    labs(fill = "", color = "")+
+     guides(
+    color = guide_legend(override.aes = list(alpha = 1)),
+    fill = guide_legend(override.aes = list(alpha = 1))
+  ) +
+   labs(title = "Ecoregion", x = "NMDS1", y = "")+
+   theme_classic()+
+ theme(legend.justification = c(1, 1), legend.position = "inside")
+ 
+   
+#Habitat ----
+centroid <- nmds.tot%>% filter(NMDS1 < 0.4 & NMDS1 > -1 & NMDS2 < 1.2 & NMDS2 > -0.6)%>%
+   group_by(habitat)%>%
+   summarise(NMDS1 = mean(NMDS1), NMDS2 = mean(NMDS2))
+   
+   c_hab = c(`conifers` = "#51939e",
+             `grassland` = "#ffc266",
+             `oaks` = "#c54460")
+   
+ nmds.tot%>%
+   ggplot(aes(x = NMDS1, y = NMDS2, color = habitat))+
+   geom_point(shape = 21, aes(color = habitat, fill = habitat), alpha = 0.5)+ #samples
+     geom_point(data = centroid, size = 6, color = 'black', shape = 21, aes(fill = habitat))+ #centroids
+   stat_ellipse(show.legend = F, geom = "polygon", aes(fill = habitat), alpha = 0.03)+ #conf intervals
+  scale_fill_manual(values = c_hab)+
+  scale_color_manual(values = c_hab)+
+  scale_y_continuous(limits = c(-0.5,0.5))+
+  scale_x_continuous(limits = c(-1,1))+
+  labs(fill = "", color = "")+
+  guides(
+    color = guide_legend(override.aes = list(alpha = 1)),
+    fill = guide_legend(override.aes = list(alpha = 1))) +
+   labs(title = "Habitat", x = "NMDS1", y = "")+
+   theme_classic()+
+ theme(legend.justification = c(1, 1), legend.position = "inside") 
+ 
+#Burn ----
+ centroid <- nmds.tot%>% filter(NMDS1 < 1 & NMDS1 > -1 & NMDS2 < 1 & NMDS2 > -1)%>%
+   group_by(burn_history)%>%
+   summarise(NMDS1 = mean(NMDS1), NMDS2 = mean(NMDS2))
+   
+ nmds.tot%>%
+   ggplot(aes(x = NMDS1, y = NMDS2, color = burn_history))+
+   geom_point(shape = 21, aes(color = burn_history, fill = burn_history), alpha = 0.5)+ #samples
+     geom_point(data = centroid, size = 6, color = 'black', shape = 21, aes(fill = burn_history))+ #centroids
+   stat_ellipse(show.legend = F, geom = "polygon", aes(fill = burn_history), alpha = 0.03)+ #conf intervals
+  scale_fill_manual(values = c("goldenrod3","grey"))+
+  scale_color_manual(values = c("goldenrod3","grey"))+
+  scale_y_continuous(limits = c(-0.5,0.5))+
+  scale_x_continuous(limits = c(-1,1))+
+  labs(fill = "", color = "")+
+  guides(
+    color = guide_legend(override.aes = list(alpha = 1)),
+    fill = guide_legend(override.aes = list(alpha = 1))) +
+   labs(title = "Burn History", x = "NMDS1", y = "")+
+   theme_classic()+
+ theme(legend.justification = c(1, 1), legend.position = "inside") 
+   
+```
+
+```{r NMDS - Habitat by Single Ecoregion, fig.height = 6, fig.width = 6}
+
+macro_nmds_metadata_single <- macro_nmds_metadata%>%
+  filter(ecoregion == "PNW")
+
+macro_nmds_single <- macro_nmds_clean %>%
+  rownames_to_column("Sample_ID")%>%
+  filter(Sample_ID %in% macro_nmds_metadata_single$Sample_ID)%>%
+  column_to_rownames("Sample_ID")
+
+dist.sing <- vegdist(macro_nmds_single, method = 'bray', data = macro_nmds_clean, na.rm = T)
+dist.mat.sing <- as.matrix(dist.sing)
+
+## Running the NMDS ----
+nmds <- metaMDS(dist.sing, distance = 'bray', k = 2, trymax = 20)
+nmds.df <- nmds %>%scores() %>%as_tibble(rownames = "Sample_ID")
+nmds.sing <- nmds.df%>% left_join(dat, by = "Sample_ID")%>%filter(!is.na(site))
+
+#Looking for outliers during initial run without filtering
+outliers <- nmds.sing%>% filter(!NMDS1 < 1.5 | !NMDS1 > -1.5 | !NMDS2 < 1.5 | !NMDS2 > -1.5)
+
+#making sure what I want to test is a factor
+macro_nmds_metadata_single$habitat <- as.factor(macro_nmds_metadata_single$habitat)
+
+#is there a difference in ecoregion centroids?
+adonis2(dist.sing ~ habitat, data = macro_nmds_metadata_single, permutations = 1e3)
+
+
+library(pairwiseAdonis)
+#Post hoc test
+pairwise.adonis2(dist.sing ~ habitat, data = macro_nmds_metadata_single )
+#seems like all are significantly different from one another, interesting
+
+#what about ecoregion dispersion - multivariate homogeneity (PERMDISP)?
+betadispr <- betadisper(dist.sing, macro_nmds_metadata_single$habitat)
+anova(betadispr) 
+
+
+#Graphing
+
+#Centroids by Hab
+centroid.hab <- nmds.sing%>%
+  filter(!Sample_ID %in% outliers$Sample_ID)%>%
+   group_by(habitat)%>%
+   summarise(NMDS1 = mean(NMDS1), NMDS2 = mean(NMDS2))
+
+c_hab = c(`conifers` = "#51939e",
+             `grassland` = "#ffc266",
+             `oaks` = "#c54460")
+   
+ nmds.sing%>%
+   ggplot(aes(x = NMDS1, y = NMDS2, color = habitat))+
+   geom_point(shape = 21, aes(color = habitat, fill = habitat), alpha = 0.5)+ #samples
+#centroids
+   geom_point(data = centroid.hab, size = 6, color = 'black', shape = 21, aes(fill = habitat))+ 
+   stat_ellipse(show.legend = F, geom = "polygon", aes(fill = habitat), alpha = 0.03)+ #conf intervals
+  scale_fill_manual(values = c_hab)+
+  scale_color_manual(values = c_hab)+
+  scale_y_continuous(limits = c(-1,1))+ #'zoom in' for each ecoregion
+  scale_x_continuous(limits = c(-2,2))+
+  labs(fill = "", color = "")+
+  guides(
+    color = guide_legend(override.aes = list(alpha = 1)),
+    fill = guide_legend(override.aes = list(alpha = 1))) +
+   labs(title = "Pacific Northwest", x = "NMDS1", y = "NMDS2")+
+   theme_classic()+
+ theme(legend.justification = c(1, 1), legend.position = "none",
+       plot.title = element_text(size = 20)) 
+
+
+```
+
+```{r NMDS - Burn by Single Ecoregion, fig.height = 6, fig.width = 6}
+
+macro_nmds_metadata_single <- macro_nmds_metadata%>%
+  filter(ecoregion == "GRTL")
+
+macro_nmds_single <- macro_nmds_clean %>%
+  rownames_to_column("Sample_ID")%>%
+  filter(Sample_ID %in% macro_nmds_metadata_single$Sample_ID)%>%
+  column_to_rownames("Sample_ID")
+
+dist.sing <- vegdist(macro_nmds_single, method = 'bray', data = macro_nmds_clean, na.rm = T)
+dist.mat.sing <- as.matrix(dist.sing)
+
+## Running the NMDS ----
+nmds <- metaMDS(dist.sing, distance = 'bray', k = 2, trymax = 20)
+nmds.df <- nmds %>%scores() %>%as_tibble(rownames = "Sample_ID")
+nmds.sing <- nmds.df%>% left_join(dat, by = "Sample_ID")%>%filter(!is.na(site))
+
+#Looking for outliers during initial run without filtering
+outliers <- nmds.sing%>% filter(!NMDS1 < 1.5 | !NMDS1 > -1.5 | !NMDS2 < 1.5 | !NMDS2 > -1.5)
+
+#making sure what I want to test is a factor
+macro_nmds_metadata_single$burn_history <- as.factor(macro_nmds_metadata_single$burn_history)
+
+#is there a difference in ecoregion centroids?
+adonis2(dist.sing ~ burn_history, data = macro_nmds_metadata_single, permutations = 1e3)
+
+#what about ecoregion dispersion - multivariate homogeneity (PERMDISP)?
+betadispr <- betadisper(dist.sing, macro_nmds_metadata_single$burn_history)
+anova(betadispr) 
+
+#Graphing
+
+#Centroids by Burn
+centroid.burn <- nmds.sing%>%
+  filter(!Sample_ID %in% outliers$Sample_ID)%>%
+   group_by(burn_history)%>%
+   summarise(NMDS1 = mean(NMDS1), NMDS2 = mean(NMDS2))
+
+   
+ nmds.sing%>%
+  ggplot(aes(x = NMDS1, y = NMDS2, color = burn_history))+
+  geom_point(shape = 21, aes(color = burn_history, fill = burn_history), alpha = 0.5)+ #samples
+  geom_point(data = centroid.burn, size = 6, color = 'black', shape = 21, aes(fill = burn_history))+ 
+  stat_ellipse(show.legend = F, geom = "polygon", aes(fill = burn_history), alpha = 0.03)+ #conf 
+  scale_fill_manual(values = c("goldenrod3","grey"))+
+  scale_color_manual(values = c("goldenrod3","grey"))+
+  scale_y_continuous(limits = c(-.75,.75))+
+  scale_x_continuous(limits = c(-.75,.75))+
+  labs(fill = "", color = "")+
+  guides(color = guide_legend(override.aes = list(alpha = 1)),
+    fill = guide_legend(override.aes = list(alpha = 1))) +
+  labs(title = "Great Lakes", x = "NMDS1", y = "")+
+  theme_classic()+
+  theme(legend.justification = c(1, 1), legend.position = "inside")
+
+
+```
+
+```{r PERMANOVA and Disper}
+#PERMANOVA and BetaDisper
+
+#making sure eveything I want to test is a factor
+macro_nmds_metadata$ecoregion <- as.factor(macro_nmds_metadata$ecoregion)
+macro_nmds_metadata$habitat <- as.factor(macro_nmds_metadata$habitat)
+macro_nmds_metadata$burn_history <- as.factor(macro_nmds_metadata$burn_history)
+
+
+#is there a difference in ecoregion centroids?
+adonis2(dist ~ ecoregion, data = macro_nmds_metadata, permutations = 1e3)
+#R2 = 0.146, p < 0.001
+library(pairwiseAdonis)
+#Post hoc test
+pairwise.adonis2(dist ~ ecoregion, data = macro_nmds_metadata )
+#seems like all are significantly different from one another, interesting
+
+#what about ecoregion dispersion - multivariate homogeneity (PERMDISP)?
+betadispr <- betadisper(dist, macro_nmds_metadata$ecoregion)
+anova(betadispr) #dispersion is highly sig, 
+#we will need to look at the NMDS to see if there is a joined effect or we thing it is just a dispersion signal
+#There was another paper that claimed sig in both and called it more of a paired effect. There are some ecoregions that have similar dispersion when looking at the NMDS so I think both tests are relevant
+
+
+adonis2(dist ~ habitat, data = macro_nmds_metadata, permutations = 1e3)
+#p << 0.001, R2 = 0.02, DF = 2
+#the very low R2 makes me think this may be a betadispersion story but lets see
+betadispr <- betadisper(dist, macro_nmds_metadata$habitat)
+anova(betadispr) # p > 0.205, there is significant p-value with no difference in variance!
+
+
+#Post hoc test
+pairwise.adonis2(dist ~ habitat, data = macro_nmds_metadata )
+#seems like all three are different from one another, interesting
+
+adonis2(dist ~ burn_history, data = macro_nmds_metadata, permutations = 1e3)
+#p < 0.001, R2 = 0.0036
+betadispr <- betadisper(dist, macro_nmds_metadata$burn_history)
+anova(betadispr)
+#no variance separation, there is a burn effect in community composition!
+
+#testing nested effects in the PERMANVOA
+library(permute)
+
+#dealing with the nested effects
+macro_nmds_metadata$nest_ID <- paste(macro_nmds_metadata$ecoregion, macro_nmds_metadata$habitat, sep = "_")
+
+#shuffles things only within the nest ID so SE burned oak only compared to SE unburned oak
+h <- how(plots = Plots(strata = macro_nmds_metadata$nest_ID), nperm = 999) 
+
+adonis2(dist ~ ecoregion + habitat + burn_history, data = macro_nmds_metadata, permutations = h, by = "terms")
+#Ecoregion - p < 0.001 R2 = 0.146
+#Habitat - p < 0.001 R2 = 0.011
+#Burn = p < 0.001 R2 = 0.003
+
+#Switching 'terms' to 'margin' makes it no longer sequential, forcing me to see if the sig of burn or habitat should've actually belonged to ecoregion
+adonis2(dist ~ ecoregion + habitat + burn_history, data = macro_nmds_metadata, permutations = h, by = "margin")
+#Ecoregion - R2 = 0.135, p = 0.010
+#Habitat - R2 = 0.01097, p = 0.097 -> any seen significance in habitat was actually because different ecoregions have different habitat identities
+#Burn - R2 = 0.0027, p < 0.001 --> is significant, there is a lasting and robust burn effect but it explains very little (0.27 %)
+#residual R2 = 0.84
+
+```
+
+```{r Indicator Species?}
+library(indicspecies)
+
+otu.df.genus <- macro.data.long %>%
+  filter(!str_detect(Genus_80, "_sedis"))%>%
+  #filter(ecoregion == "SE")%>% # change or remove for ecoregion-level
+  group_by(Sample_ID, Genus_80)%>%
+  summarise(Count = sum(Abundance), .groups = 'drop')%>%
+  pivot_wider(values_from = "Count",names_from = "Genus_80")%>%
+  column_to_rownames(var = "Sample_ID")
+
+otu.df.genus[is.na(otu.df.genus)] <- 0
+
+samp.list <- rownames(otu.df.genus)
+
+ind.metadata <- otu.df.genus %>%
+  rownames_to_column(var = "Sample_ID") %>%
+  left_join(dat, by = "Sample_ID")
+
+#group.eco <- as.vector(ind.metadata$ecoregion)
+group.burn <- as.vector(ind.metadata$burn_history)
+group.hab <- as.vector(ind.metadata$habitat)
+
+#indval_eco <- multipatt(otu.df.genus, group.eco, control = how(nperm=999))
+indval_burn <- multipatt(otu.df.genus, group.burn, control = how(blocks = ind.metadata$habitat))
+#indval_hab <- multipatt(otu.df.genus, group.hab, control = how(nperm=1999))
+
+summary(indval_burn, indvalcomp=TRUE, alpha = 0.05, duleg = T)
+#summary(indval_hab, indvalcomp=TRUE, alpha = 0.05)
+
+
+
+```
+
+
+```{r Fig 6 - Lifestyle Pie Chart (Full)}
+
+# Full Pie Chart ----
+
+# Calculate total abundance, exclude specific orders, and select the top 10
+lifestyle_abund_full <- 
+  macro.data.long %>%
+  filter(!Genus_80 == "Minimedusa")%>% #Odd macrofungal member within a macrofungal family
+   mutate(primary_lifestyle = replace_na(primary_lifestyle, "Unclassified"))%>%
+  filter(!primary_lifestyle == "")%>%
+  group_by(primary_lifestyle) %>%
+    summarise(rel_abund = sum(Abundance), .groups = 'drop')%>%
+  mutate(primary_lifestyle = case_when(primary_lifestyle %in% 
+                                        c("Unclassified","wood_saprotroph",
+                                        "ectomycorrhizal","soil_saprotroph",
+                                        "litter_saprotroph","plant_pathogen") ~ primary_lifestyle,
+                                       TRUE ~ "Other"))%>%
+  mutate(primary_lifestyle = gsub("wood_saprotroph","Wood Saprotroph",primary_lifestyle), #Just making it look better
+         primary_lifestyle = gsub("ectomycorrhizal","Ectomychorrizal",primary_lifestyle),
+         primary_lifestyle = gsub("soil_saprotroph","Soil Saprotroph",primary_lifestyle),
+         primary_lifestyle = gsub("litter_saprotroph","Litter Saprotroph",primary_lifestyle),
+         primary_lifestyle = gsub("plant_pathogen","Plant Pathogen",primary_lifestyle))%>%
+    group_by(primary_lifestyle) %>%
+    summarise(mean_rel_abund = mean(rel_abund), .groups = 'drop')
+
+#creating a consistent color palette
+pie_palette <- c(
+  Unclassified = "#7F7F7F",
+  `Wood Saprotroph` = "#E69F00",
+  Ectomychorrizal = "#D55E00",
+  `Soil Saprotroph` = "#009E73",
+  `Litter Saprotroph` = "#56B4E9",
+  `Plant Pathogen` = "#F0E442",
+  Other = "#CC79A7"
+)
+
+processed_lifestyle_full <- 
+  lifestyle_abund_full%>%
+    mutate(primary_lifestyle = factor(primary_lifestyle))%>%
+  arrange(desc(mean_rel_abund))
+
+library(RColorBrewer)
+
+pie(processed_lifestyle_full$mean_rel_abund,
+    labels =c(""), 
+    #labels = processed_lifestyle_full$primary_lifestyle,
+  col = pie_palette[as.character(processed_lifestyle_full$primary_lifestyle)],
+  main = "All Ecoregions",
+  border = 'white', lwd = 10)
+
+#Saving the Image
+png(file = "C:/Users/ratza/OneDrive/Desktop/Kennedy Lab Work/CLIMUSH/Figure Images/Plot6_1.png", 
+    width = 1200, height = 1200)
+pie(processed_lifestyle_full$mean_rel_abund, labels =c(""),
+  col = pie_palette[as.character(processed_lifestyle_full$primary_lifestyle)],
+  main = "All Ecoregions", border = 'white')
+dev.off()#saving the plot and returning
+```
+
+```{r Figure 6 - Pie Chart ~ Ecoregion}
+# Pie Charts by Ecoregion----
+lifestyle_abund <- 
+  macro.data.long %>%
+  filter(!Genus_80 == "Minimedusa")%>% # a stray OTU that shouldnt be here?
+   mutate(primary_lifestyle = replace_na(primary_lifestyle, "Unclassified"))%>%
+  filter(!primary_lifestyle == "")%>%
+  group_by(ecoregion, primary_lifestyle) %>%
+    summarise(rel_abund = sum(Abundance), .groups = 'drop')%>%
+  mutate(primary_lifestyle = case_when(primary_lifestyle %in% 
+                                        c("Unclassified","wood_saprotroph",
+                                        "ectomycorrhizal","soil_saprotroph",
+                                        "litter_saprotroph","plant_pathogen") ~ primary_lifestyle,
+                                       TRUE ~ "Other"))%>%
+  mutate(primary_lifestyle = gsub("wood_saprotroph","Wood Saprotroph",primary_lifestyle),
+         primary_lifestyle = gsub("ectomycorrhizal","Ectomychorrizal",primary_lifestyle),
+         primary_lifestyle = gsub("soil_saprotroph","Soil Saprotroph",primary_lifestyle),
+         primary_lifestyle = gsub("litter_saprotroph","Litter Saprotroph",primary_lifestyle),
+         primary_lifestyle = gsub("plant_pathogen","Plant Pathogen",primary_lifestyle))%>%
+    group_by(ecoregion, primary_lifestyle) %>%
+    summarise(mean_rel_abund = mean(rel_abund), .groups = 'drop')
+
+library(RColorBrewer)
+
+#pie charts in this way can only be done one ecoregion at a time
+processed_lifestyle <- 
+  lifestyle_abund%>%
+    mutate(primary_lifestyle = factor(primary_lifestyle))%>%
+  filter(ecoregion == "PNW")%>%
+  arrange(desc(mean_rel_abund))
+
+pie(processed_lifestyle$mean_rel_abund,
+    labels = c(""), 
+    #labels = processed_lifestyle$primary_lifestyle,
+  col = pie_palette[as.character(processed_lifestyle$primary_lifestyle)],
+  main = processed_lifestyle[1,1], #Auto places the ecoregion name
+  border = 'white',lwd = 10)
+
+#Saving the Image - Copying from the above pie chart also works if using power point
+png(file = "C:/Users/ratza/OneDrive/Desktop/Kennedy Lab Work/CLIMUSH/Figure Images/Plot6_TAIG.png", width = 600, height = 600)
+pie(processed_lifestyle$mean_rel_abund,labels = c(""), 
+    #labels = processed_lifestyle$primary_lifestyle,
+  col = pie_palette[as.character(processed_lifestyle$primary_lifestyle)],
+  main = processed_lifestyle[1,1], #Auto places the ecoregion name
+  border = 'white',lwd = 10)
+dev.off()#saving the plot and returning
+```
+
+```{r Supp Pie chart ~ Ecoregion / Hab}
+# The three Habitats ----
+
+# Calculate total abundance, exclude specific orders, and select the top 10
+lifestyle_abund_hab <- 
+  macro.data.long %>%
+  filter(!Genus_80 == "Minimedusa")%>% #Odd macrofungal member within a macrofungal family
+   mutate(primary_lifestyle = replace_na(primary_lifestyle, "Unclassified"))%>%
+  filter(!primary_lifestyle == "")%>%
+  group_by(habitat, primary_lifestyle) %>%
+    summarise(rel_abund = sum(Abundance), .groups = 'drop')%>%
+  mutate(primary_lifestyle = case_when(primary_lifestyle %in% 
+                                        c("Unclassified","wood_saprotroph",
+                                        "ectomycorrhizal","soil_saprotroph",
+                                        "litter_saprotroph","plant_pathogen") ~ primary_lifestyle,
+                                       TRUE ~ "Other"))%>%
+  mutate(primary_lifestyle = gsub("wood_saprotroph","Wood Saprotroph",primary_lifestyle), #Just making it look better
+         primary_lifestyle = gsub("ectomycorrhizal","Ectomychorrizal",primary_lifestyle),
+         primary_lifestyle = gsub("soil_saprotroph","Soil Saprotroph",primary_lifestyle),
+         primary_lifestyle = gsub("litter_saprotroph","Litter Saprotroph",primary_lifestyle),
+         primary_lifestyle = gsub("plant_pathogen","Plant Pathogen",primary_lifestyle))%>%
+    group_by(habitat, primary_lifestyle) %>%
+    summarise(mean_rel_abund = mean(rel_abund), .groups = 'drop')
+
+#arranging for ease of plotting
+processed_lifestyle_hab <- 
+  lifestyle_abund_hab%>%
+    mutate(primary_lifestyle = factor(primary_lifestyle))%>%
+  filter(habitat == "grassland")%>%
+  arrange(desc(mean_rel_abund))
+
+
+pie(processed_lifestyle_hab$mean_rel_abund,
+    labels =c(""), 
+    #labels = processed_lifestyle_hab$primary_lifestyle,
+  col = pie_palette[as.character(processed_lifestyle_hab$primary_lifestyle)],
+  main = "",
+  border = 'white', lwd = 10)
+
+# The three Habitats + Ecoregions ----
+
+# Calculate total abundance, exclude specific orders, and select the top 10
+lifestyle_abund_hab <- 
+  macro.data.long %>%
+  filter(!Genus_80 == "Minimedusa")%>% #Odd macrofungal member within a macrofungal family
+   mutate(primary_lifestyle = replace_na(primary_lifestyle, "Unclassified"))%>%
+  filter(!primary_lifestyle == "")%>%
+  filter(ecoregion == "TAIG")%>%
+  group_by(habitat, primary_lifestyle) %>%
+    summarise(rel_abund = sum(Abundance), .groups = 'drop')%>%
+  mutate(primary_lifestyle = case_when(primary_lifestyle %in% 
+                                        c("Unclassified","wood_saprotroph",
+                                        "ectomycorrhizal","soil_saprotroph",
+                                        "litter_saprotroph","plant_pathogen") ~ primary_lifestyle,
+                                       TRUE ~ "Other"))%>%
+  mutate(primary_lifestyle = gsub("wood_saprotroph","Wood Saprotroph",primary_lifestyle), #Just making it look better
+         primary_lifestyle = gsub("ectomycorrhizal","Ectomychorrizal",primary_lifestyle),
+         primary_lifestyle = gsub("soil_saprotroph","Soil Saprotroph",primary_lifestyle),
+         primary_lifestyle = gsub("litter_saprotroph","Litter Saprotroph",primary_lifestyle),
+         primary_lifestyle = gsub("plant_pathogen","Plant Pathogen",primary_lifestyle))%>%
+    group_by(habitat, primary_lifestyle) %>%
+    summarise(mean_rel_abund = mean(rel_abund), .groups = 'drop')
+
+#arranging for ease of plotting
+processed_lifestyle_hab <- 
+  lifestyle_abund_hab%>%
+    mutate(primary_lifestyle = factor(primary_lifestyle))%>%
+  filter(habitat == "conifers")%>%
+  arrange(desc(mean_rel_abund))
+
+
+pie(processed_lifestyle_hab$mean_rel_abund,
+    labels =c(""), 
+    #labels = processed_lifestyle_hab$primary_lifestyle,
+  col = pie_palette[as.character(processed_lifestyle_hab$primary_lifestyle)],
+  main = "",
+  border = 'white', lwd = 10)
+
+
+
+
+```
+
+
+```{r Table 1 - Top 10 Genera ~ Ecoregion w/ Occ}
+
+Top_eco_Gen <- macro.data.long %>%
+  filter(!is.na(Genus_80) & !Genus_80 == "" & !Genus_80 == "Minimedusa" & !str_detect(Genus_80, "_sedis"))%>% 
+  group_by(ecoregion, Genus_80) %>%
+    summarise(rel_abund = sum(Abundance), mean_rel_abund = mean(Abundance))%>%
+  arrange(ecoregion, desc(mean_rel_abund))%>%
+  slice_max(mean_rel_abund, n = 10) %>% mutate(rank = paste("Rank",row_number(), sep = " "))%>%
+  ungroup() 
+
+
+#pulling number of samples in each ecoregion for occupancy calcs
+n_sample <- dat %>%
+  group_by(ecoregion) %>% summarise(n_samples =n())
+
+#calculating occupancy for each selected genus
+Gen_Occ <- macro.data.long %>%
+  filter(!is.na(Genus_80) & !Genus_80 == "" & !Genus_80 == "Minimedusa" & 
+           !str_detect(Genus_80, "_sedis"))%>% 
+  distinct(ecoregion, Genus_80, Sample_ID)%>%
+  group_by(ecoregion, Genus_80)%>%
+  summarise(n = n(), .groups = 'drop') %>% filter(Genus_80 %in% Top_eco_Gen$Genus_80) %>%
+  left_join(n_sample, by = "ecoregion", relationship = "many-to-many", multiple = "all")%>%
+  mutate(occ = n / n_samples) #%>% select(-n, -n_samples)
+  
+#making it into a pretty table
+Top_eco_Gen_table <- 
+  Top_eco_Gen%>%
+  left_join(Gen_Occ, by = c("ecoregion", "Genus_80"))%>%
+  #sprintf allows rounding with a tailing zero  
+    mutate(Genus = paste0(Genus_80, " (", sprintf("%.2f",occ), ")"))%>%
+  select(rank, ecoregion, Genus)%>%
+  pivot_wider(values_from = Genus, names_from = ecoregion)%>%
+  column_to_rownames(var = "rank")
+
+write.csv(Top_eco_Gen_table, "Table_1.csv")
+
+```
+

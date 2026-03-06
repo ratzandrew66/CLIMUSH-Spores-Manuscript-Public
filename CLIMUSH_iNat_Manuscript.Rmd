@@ -1,0 +1,549 @@
+---
+title: "Climush_iNat_Manuscript"
+author: "Andrew Ratz"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+`
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(vegan)
+
+setwd("C:/Users/ratza/OneDrive/Desktop/Kennedy Lab Work/CLIMUSH")
+
+```
+
+```{r Creating spore genus table}
+
+spore.dat <- read.csv("dat.csv")
+macro.data.long <- read.csv("macro_long.csv")
+
+#some formatting to fit iNaturalist data
+spore.dat <- spore.dat%>%
+  mutate(year = year + 2000)%>%
+  mutate(date = paste(year, month, day, sep = "-"))
+
+spore.dat$date <- as.Date(spore.dat$date, format = "%Y-%m-%d")
+
+spore.dat$DatePickedUp <- paste("20",spore.dat$DatePickedUp, sep = "")
+spore.dat$DateOut <- paste("20",spore.dat$DateOut, sep = "")
+
+spore.dat$DatePickedUp <- as.Date(spore.dat$DatePickedUp, format = "%Y-%m-%d")
+spore.dat$DateOut <- as.Date(spore.dat$DateOut, format = "%Y-%m-%d")
+
+
+temp <- spore.dat%>% filter(is.na(DatePickedUp))%>%
+  mutate(DatePickedUp = DateOut + 31)%>%
+  mutate(Nr.days.out = as.numeric(DatePickedUp - DateOut))%>%
+  mutate(log.days.out = log(Nr.days.out))
+
+spore.temp <- rbind(spore.dat, temp)
+
+spore.dat <- spore.temp%>% filter(!is.na(DatePickedUp))
+
+macro.data.long%>% filter(is.na(ecoregion))
+
+#adjusted spore OTU table
+spore_species <- macro.data.long%>%
+  filter(!str_detect(Genus, "_sedis"), !is.na(Genus), Species_support >= 0.8)%>%
+  group_by(Sample_ID, Species)%>%
+  summarise(Count = n())%>%
+  left_join(spore.dat[,c(2,9,19,51)], by = "Sample_ID", relationship = "many-to-many", 
+            multiple = 'any')%>%
+  filter(!is.na(ecoregion), !is.na(season))%>%
+  mutate(season = case_when(season == "early" ~ "E", season == "late" ~ "L"))%>%
+  mutate(ID = paste(ecoregion,year,season,"S", sep = "_"))
+
+```
+I now have a list of all of the species found in the spore samples at each sample with support above 0.8. I now have to pull in the iNat data, filter it to the time frames of the spore traps, and filter the species found within the spores
+
+
+```{r Loading iNat data}
+#the total iNat data includes the transects, so I can load it all in at once
+FL_iNat <- read.csv("FL_iNat_30km.csv")
+  FL_iNat$common_name <- NULL
+  FL_iNat$species_guess <- NULL
+  FL_iNat$iconic_taxon_name <- NULL
+  FL_iNat$ecoregion <- "SE"
+  FL_iNat$site<- "ORD"
+  FL_iNat$state<- "FL"
+AZ_iNat <- read.csv("AZ_iNat_30km.csv")
+  AZ_iNat$ecoregion <- "DSW"
+  AZ_iNat$site<- "SRE"
+  AZ_iNat$state<- "AZ"
+AK_iNat <- read.csv("AK_iNat_30km.csv")
+  AK_iNat$ecoregion <- "TAIG"
+  AK_iNat$site<- "BNZ"
+  AK_iNat$state<- "AK"
+CO_iNat <- read.csv("CO_iNat_30km.csv")
+  CO_iNat$ecoregion <- "SROC"
+  CO_iNat$site<- "NWT"
+  CO_iNat$state<- "CO"
+KS_iNat <- read.csv("KS_iNat_30km.csv")
+  KS_iNat$ecoregion <- "PRAI"
+  KS_iNat$site<- "KON"
+  KS_iNat$state<- "KS"
+MA_iNat <- read.csv("MA_iNat_30km.csv")
+  MA_iNat$ecoregion <- "NE"
+  MA_iNat$site<- "HARV"
+  MA_iNat$state<- "MA"
+MN_iNat <- read.csv("MN_iNat_30km.csv")
+  MN_iNat$ecoregion <- "GRTL"
+  MN_iNat$site<- "CDR"
+  MN_iNat$positional_accuracy <- 1
+  MN_iNat$positioning_method <- NA
+  MN_iNat$state<- "MN"
+OR_PIS_iNat <- read.csv("OR_PIS_iNat_30km.csv")
+  OR_PIS_iNat$ecoregion <- "PNW"
+  OR_PIS_iNat$site<- "PIS"
+  OR_PIS_iNat$state<- "OR"
+OR_HJA_iNat <- read.csv("OR_HJA_iNat_30km.csv")
+  OR_HJA_iNat$ecoregion <- "PNW"
+  OR_HJA_iNat$site<- "HJA"
+  OR_HJA_iNat$state<- "OR"
+
+iNat_df <- rbind(FL_iNat,AZ_iNat,AK_iNat,CO_iNat,KS_iNat,MA_iNat,MN_iNat,
+              OR_PIS_iNat,OR_HJA_iNat)
+
+#some cleaning after the fact
+rm(FL_iNat,AZ_iNat,AK_iNat,CO_iNat,KS_iNat,MA_iNat,MN_iNat,
+              OR_PIS_iNat,OR_HJA_iNat)
+
+```
+
+
+```{r Creating transect genus table}
+#new df into the pipeline, seeing if this works
+transect.dat.raw <- iNat_df %>% dplyr::select(-ecoregion,-site,-state)
+transect.dat.raw %>% distinct(taxon_genus_name)
+#changing format of date and time
+transect.dat <- transect.dat.raw%>%
+separate_wider_delim(time_observed_at, " ", names = c("date","time","timezone"),
+                       too_few = "align_start")%>%
+filter(!is.na(timezone))%>%
+mutate(timezone = NULL)
+
+transect.dat$date <- as.Date(transect.dat$date, format = "%Y-%m-%d")#turning into true date format for calculations
+
+
+transect.dat$year<-str_extract(transect.dat$date,"^[^-]+") #pulling year from the date column
+
+transect.dat <- transect.dat%>%
+  mutate(state = case_when(
+    place_state_name == "Alaska" ~ "AK", place_state_name == "Arizona" ~ "AZ",
+    place_state_name == "Colorado" ~ "CO", place_state_name == "Florida" ~ "FL", 
+    place_state_name == "Kansas" ~ "KS", place_state_name == "Oregon" ~ "OR",
+    place_state_name == "Massachusetts" ~ "MA", place_state_name == "Minnesota" ~ "MN"))
+
+
+#When were spores collected
+library(lubridate)
+
+spore.dat <- spore.dat%>%
+  mutate(start_date = date - days(14), end_date = DatePickedUp)%>%
+  arrange(state, year, start_date)
+  
+samp.timeframe <- spore.dat%>%  
+  group_by(state, year)%>%
+  mutate(
+    time_gap = as.numeric(start_date - lag(end_date, default = first(start_date))),
+    group = cumsum(time_gap > 14))%>% #2 weeks based on earlier studies
+  group_by(state, year, group)%>%
+  summarise(start_date = min(start_date), 
+            end_date = max(end_date), .groups = "drop")%>%
+  dplyr::select(-group)
+
+
+library(fuzzyjoin)
+#filtering data only found in sampling timeframe I want
+transect.dat <- fuzzy_inner_join(
+  transect.dat, samp.timeframe,
+  by = c("state" = "state", "year" = "year", "date" = "start_date", "date" = "end_date"),
+  match_fun = list(`==`,`==`,`>=`,`<=`))
+
+#adjusting taxa data
+transect.dat <- transect.dat%>%
+  rename("phylum" = "taxon_phylum_name", "class" = "taxon_class_name",
+         "order" = "taxon_order_name", "family" = "taxon_family_name",
+         "genus" = "taxon_genus_name", "species" = "taxon_species_name")
+
+#giving transect data ecoregion and season
+
+#some cleaning
+transect.dat <-transect.dat%>%
+  rename("state" = "state.x", "year" = "year.x")%>%
+  mutate(state.y = NULL, year.y = NULL)
+
+#creating jovial day then assigning season
+dates <- as.Date(transect.dat$date, format = "%Y-%m-%d")
+start_of_year <- as.Date(paste(transect.dat$year, "01", "01", sep = "-"), format = "%Y-%m-%d")
+days_since_start <- as.numeric(dates - start_of_year)
+transect.dat$nday <- days_since_start
+
+transect.dat <- transect.dat%>%
+  mutate(season = case_when(
+    state %in% c("MA","CO") & nday < 195 ~ "early",
+    state %in% c("MA","CO") & nday > 195 ~ "late",
+    state %in% c("AK","AZ","KS","MN","OR") & nday < 155 ~ "early",
+    state %in% c("AK","AZ","KS","MN","OR") & nday > 155 ~ "late",
+    (state == "FL" & nday < 155) | (state == "FL" & nday > 310) ~ "early",
+    state == "FL" & nday > 155 & nday < 310 ~ "late",
+  ))
+
+#assigning ecoregion based on state
+transect.dat <- transect.dat%>%
+  mutate(ecoregion = case_when ( state == "AK" ~ 'TAIG',state == "AZ" ~ 'DSW',
+                                 state == "CO" ~ 'SROC',state == "FL" ~ 'SE',
+                                 state == "KS" ~ 'PRAI',state == "MA" ~ 'NE',
+                                 state == "MN" ~ 'GRTL',state == "OR" ~ 'PNW'))
+
+#only genera that are found in the spore data
+transect.dat.filtered <- transect.dat %>%
+  filter(genus %in% macro.data.long$Genus)
+
+length(unique(transect.dat.filtered$genus))
+
+library(geosphere)
+
+#location of each treatment
+treatment_points <- spore.dat%>% filter(!is.na(Lat_dec)) %>%
+  group_by(state,treatment) %>% summarise(long = mean(Long_dec), lat = mean(Lat_dec))
+
+#distance between each treatment
+temp <- distm(transect.dat.filtered[,c(5,4)], treatment_points[,c(3,4)], fun = distGeo)
+
+#where is the nearest spore trap "treatment"
+transect.dat.filtered$distance_m <- apply(temp, 1, FUN = min)
+
+#making the otu table
+transect_species <- transect.dat.filtered%>%
+  mutate_if(is.character, list(~na_if(.,"")))%>%
+  mutate(species = case_when(species == "" | is.na(species) ~ paste(genus, "sp", sep = " ")
+                             ,TRUE ~ species))%>%
+  mutate(season = case_when(season == "early" ~ "E", season == "late" ~ "L"))%>%
+  mutate(ID = paste(ecoregion,year,season, sep = "_"))
+
+#species column matching the spore data formatting
+transect_species$species <- gsub(" ","_", transect_species$species)
+
+transect_species%>% group_by(ecoregion)%>%summarise(n = n())%>% summarise(mean = mean(n))
+transect_species%>% distinct(genus, ecoregion) %>% group_by(ecoregion)%>% summarise(n = n())%>% summarise(mean = mean(n))
+
+write.csv(transect_species, "CLIMUSH_iNat_curated.csv")
+
+```
+
+```{r Proportion of Shared Genera & Breakpoint}
+
+#making a key to pull multiple groups for the overlap
+Overlap_key <- macro.data.long%>%
+  mutate(key = paste(Genus_80, ecoregion, sep = "_")) %>%
+  pull(key)
+
+#getting the initial dataframe for the overlapping genera
+iNat_prop <- transect.dat %>%
+  mutate_if(is.character, list(~na_if(.,"")))%>%
+  mutate(species = case_when(species == "" | is.na(species) ~ paste(genus, "sp", sep = "_")
+                             ,TRUE ~ gsub(" ", "_", species)))%>%
+  mutate(key = paste(genus, ecoregion, sep = "_"))%>%
+  mutate(overlap = case_when(key %in% Overlap_key ~ "Overlap", TRUE ~ "None"))
+
+spore_prop <- macro.data.long%>%
+  filter(!is.na(ecoregion), !is.na(Genus_80))%>%
+  filter(!str_detect(Genus_80,'sedis'))%>%
+  mutate(key = paste(Genus_80, ecoregion, sep = "_")) %>%
+  distinct(key)%>%
+  mutate(overlap = case_when(key %in% iNat_prop$key ~ "Overlap", TRUE ~ "Spore Only"))%>%
+  left_join(iNat_prop[,c(22,24,4,5)], by = 'key')
+
+#distance between each treatment
+temp <- distm(iNat_prop[,c(5,4)], treatment_points[,c(3,4)], fun = distGeo)
+
+#where is the nearest spore trap "treatment"
+iNat_prop$distance_m <- apply(temp, 1, FUN = min)
+
+temp <- iNat_prop %>%
+  group_by(ecoregion, genus) %>% summarise(distance_m = min(distance_m))
+
+iNat_prop <-
+  iNat_prop %>%
+  right_join(temp, by = c("ecoregion","genus","distance_m"))
+
+
+iNat_prop_summary <- iNat_prop %>%
+  mutate(distance_bin = cut(
+    distance_m, breaks = seq(0, 20000, by = 200),
+    include.lowest = FALSE,right = FALSE)) %>%
+  group_by(ecoregion, distance_bin) %>%
+  # 3. Calculate overlap proportion
+  summarise(
+    total_n = n(),
+    overlap_n = sum(overlap == "Overlap", na.rm = TRUE),
+    .groups = "drop_last"
+  ) %>%
+  # Arrange bins numerically within each ecoregion
+  #mutate(bin_start = as.numeric(str_extract(as.character(distance_bin), "\\d+(\\.\\d+)?"))) %>%
+  arrange(ecoregion, distance_bin) %>%
+  filter(!is.na(distance_bin))%>%
+  # Compute cumulative totals and cumulative proportion
+  mutate(
+    cum_total = cumsum(total_n),
+    cum_overlap = cumsum(overlap_n),
+    cum_prop = cum_overlap / cum_total
+  ) %>%
+  ungroup()
+
+breaks <- seq(0,20000,by = 200)
+iNat_prop_summary <- iNat_prop_summary %>%
+  mutate(bin_start = breaks[as.integer(distance_bin)])
+
+#Fitting the Model to predict data
+fit <- nls(cum_prop ~ a * exp(-b * bin_start)+c, 
+           data = iNat_prop_summary, 
+           start = list(a = 1, b = 0.0001, c = 0.1))
+summary(fit)
+
+#running prediction
+iNat_prop_summary$fit <- predict(fit)
+
+iNat_prop_summary <- iNat_prop_summary %>% filter(!is.na(ecoregion))
+
+#finding the Breakpont
+library(segmented)
+
+lm_fit <- lm(log(cum_prop) ~ bin_start, data = iNat_prop_summary)
+seg_fit <- segmented(lm_fit, seg.Z = ~bin_start, psi = list(bin_start = 1000))
+
+summary(seg_fit)
+print(seg_fit$psi)
+
+#releveling ecoregions to keep colors consistent
+library(viridis)
+
+iNat_prop_summary%>%
+  mutate(ecoregion = fct_relevel(ecoregion, c("SE","NE","PNW","SROC",
+                                              "GRTL","TAIG","DSW","PRAI")))%>%
+#graphing everything
+ggplot(aes(x = bin_start/1000))+
+  geom_point(aes(y = cum_prop, color = ecoregion), shape = 18, size = 2)+
+  geom_line(aes(y = fit), color = 'black', size = 1)+
+  geom_vline(xintercept = (seg_fit$psi[2])/1000, color = 'black', lty = 2, size = 0.5)+
+  theme_classic()+
+  scale_color_viridis(discrete = T)+
+  labs(x = "Distance from Spore Trap (km)", y = "Proportion Genera Shared")
+
+
+```
+
+```{r Proportion Shared taxa one Ecoregion}
+
+iNat_prop_single_summary <- iNat_prop %>%
+  filter(ecoregion == "DSW")%>% #change for each ecoregion
+  mutate(distance_bin = cut(
+    distance_m, breaks = seq(0, 20000, by = 200),
+    include.lowest = FALSE,right = FALSE)) %>%
+  group_by(ecoregion, distance_bin) %>%
+  # 3. Calculate overlap proportion
+  summarise(
+    total_n = n(),
+    overlap_n = sum(overlap == "Overlap", na.rm = TRUE),
+    .groups = "drop_last"
+  ) %>%
+  # Arrange bins numerically within each ecoregion
+  #mutate(bin_start = as.numeric(str_extract(as.character(distance_bin), "\\d+(\\.\\d+)?"))) %>%
+  arrange(ecoregion, distance_bin) %>%
+  filter(!is.na(distance_bin))%>%
+  # Compute cumulative totals and cumulative proportion
+  mutate(
+    cum_total = cumsum(total_n),
+    cum_overlap = cumsum(overlap_n),
+    cum_prop = cum_overlap / cum_total
+  ) %>%
+  ungroup()
+
+breaks <- seq(0,20000,by = 200)
+iNat_prop_single_summary <- iNat_prop_single_summary %>%
+  mutate(bin_start = breaks[as.integer(distance_bin)])
+
+library(minpack.lm)
+#Fitting the Model to predict data
+fit_sing <- nlsLM(
+  cum_prop ~ a * exp(-b * bin_start) + c,
+  data = iNat_prop_single_summary,
+  start = list(a = 1, b = 0.001, c = 0.1)
+)
+summary(fit_sing)
+
+#running prediction
+iNat_prop_single_summary$fit <- predict(fit_sing)
+
+iNat_prop_single_summary <- iNat_prop_single_summary %>% filter(!is.na(ecoregion))
+
+#finding the Breakpont
+library(segmented)
+
+lm_fit_sing <- lm(log(cum_prop) ~ bin_start, data = iNat_prop_single_summary)
+seg_fit_sing <- segmented(lm_fit_sing, seg.Z = ~bin_start, psi = list(bin_start = 1000))
+
+#Switch this in for TAIG
+#seg_fit_sing <- segmented(lm_fit_sing,seg.Z = ~bin_start,control = seg.control(display = TRUE, quant = TRUE))
+
+summary(seg_fit_sing)
+
+# Extract breakpoint and prepare label
+bp_km <- seg_fit_sing$psi[2] / 1000
+
+#releveling ecoregions to keep colors consistent
+iNat_prop_single_summary%>%
+#graphing everything
+ggplot(aes(x = bin_start/1000))+
+  geom_point(aes(y = cum_prop))+
+  geom_line(aes(y = fit), color = 'black', size = 1)+
+  geom_vline(xintercept = bp_km, color = 'black', lty = 2, size = 0.5)+
+  geom_text(aes(x = bp_km, y = 0.75, 
+      label = paste0(round(bp_km,2), " km")),
+  inherit.aes = FALSE,
+  hjust = -0.2, vjust = 0.1, size = 6)+
+  theme_classic()+
+  theme(plot.title = element_text(size = 20), axis.title.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15) )+
+  scale_y_continuous(limits = c(0,0.8))+
+  #change labs for each ecoregion
+  labs(x = "Distance from Spore Trap (km)", y = "Proportion Genera Shared", title = "Desert Southwest") 
+
+```
+First step, I would like to make a species accumulation curve using the iNat data, sorting by the "nearest" observation to each spore trap. This is not habitat specific but IS state specific
+```{r Species accumulation by ecoregion}
+
+species.df <- transect_species %>%
+  group_by(ecoregion, species) %>%
+  summarise(min_distance_m = min(distance_m, na.rm = TRUE), .groups = "drop")
+
+#comm_matrix <- species.df %>% select(ID, species)%>% mutate(presence = 1) %>% pivot_wider(names_from = species, values_from = presence, values_fill = 0)
+
+#library(vegan)
+
+#full species accumulation df
+accum_df_full <- species.df %>%
+  group_by(ecoregion) %>%
+  arrange(min_distance_m, .by_group = TRUE) %>%
+  mutate(
+    cum_species = cumsum(!duplicated(species)),
+    total_species = n_distinct(species),
+    cum_prop = cum_species / total_species   # cumulative proportion
+  ) %>%
+  ungroup()
+
+#fitting a line using Michaelis-Mentin (AIC selection)
+nls_fit <- nls(cum_species ~ (a * min_distance_m) / (b + min_distance_m),
+               data = accum_df_full,
+               start = list(a = max(accum_df_full$cum_species), b = median(accum_df_full$min_distance_m)))
+
+
+accum_df_full$fit <- predict(nls_fit)
+coef_vals <- coef(nls_fit)
+a <- coef_vals["a"]
+b <- coef_vals["b"]
+coef_vals <- as.data.frame(as.list(coef(nls_fit)))
+
+
+#graphing all ecoregions together
+accum_df_full%>%
+mutate(ecoregion = fct_relevel(ecoregion, c("SE", "NE", "PNW","SROC","GRTL","TAIG","DSW","PRAI")))%>%
+ggplot(aes(x = min_distance_m/1000, y = cum_species)) +
+  geom_line(aes(color = ecoregion),size = 1, alpha = 0.7) +
+  geom_line(aes(y = fit), color = "blue", size = 1.2)+
+  geom_vline(data = coef_vals, aes(xintercept = b/1000), lty = 2)+
+#both 'a' and 'b'
+  #geom_text(data = coef_vals,
+  #aes(x = b, y = 650, label = paste0("a = ", round(a)," species", "\nb = ", round(b)," meters")),
+  #inherit.aes = FALSE,hjust = -0.1, vjust = 0, size = 6)+
+#doing 'b' only to match the breakpoints
+  geom_text(data = coef_vals,
+  aes(x = b/1000, y = 650, label = paste0(round(b/1000,2)," km")),
+  inherit.aes = FALSE,hjust = -0.1, vjust = 0, size = 6)+
+  scale_color_viridis(discrete = T)+
+  labs(x = "Distance from trap (km)", y = "Cumulative Number of Species",
+       title = "", color = "Ecoregion") +
+  theme_classic()
+
+```
+
+```{r SAC with range estimations by ecoregion}
+library(ggplot2)
+library(dplyr)
+
+#subsetting to run breakpoints below - change for each ecoregion
+accum_df <- accum_df_full %>% filter(ecoregion == "PNW")
+
+# Fit Michaelis-Menten model
+nls_fit <- nls(
+  cum_species ~ (a * min_distance_m) / (b + min_distance_m),
+  data = accum_df,
+  start = list(
+    a = max(accum_df$cum_species, na.rm = TRUE),
+    b = median(accum_df$min_distance_m, na.rm = TRUE)
+  )
+)
+
+# Get fitted values and coefficients
+accum_df$fit <- predict(nls_fit)
+coef_vals <- coef(nls_fit)
+a <- coef_vals["a"]
+b <- coef_vals["b"]
+coef_vals <- as.data.frame(as.list(coef(nls_fit)))
+
+# Build a smooth curve across the observed x range
+fit_df <- data.frame(
+  min_distance_m = seq(min(accum_df$min_distance_m),
+                       max(accum_df$min_distance_m),
+                       length.out = 200)
+) %>%
+  mutate(fit = (a * min_distance_m) / (b + min_distance_m))
+
+#parametric bootstrap for confidence intervals
+boot_preds <- replicate(500, {
+  new_a <- rnorm(1, mean = a, sd = summary(nls_fit)$coefficients["a","Std. Error"])
+  new_b <- rnorm(1, mean = b, sd = summary(nls_fit)$coefficients["b","Std. Error"])
+  (new_a * fit_df$min_distance_m) / (new_b + fit_df$min_distance_m)
+})
+
+fit_df$lower <- apply(boot_preds, 1, quantile, 0.025)
+fit_df$upper <- apply(boot_preds, 1, quantile, 0.975)
+
+# Plot
+fit_df$cum_species <- row_number(fit_df$min_distance_m)
+
+#putting location on the coefficients
+coef_vals <- coef_vals %>%
+  mutate(x = min(accum_df$min_distance_m, na.rm = TRUE) * 1.1,
+         y = max(accum_df$cum_species, na.rm = TRUE) * 0.9,
+         label = paste0("a = ", round(a, 2), 
+                        ", b = ", round(b, 2)))
+
+
+
+ggplot(accum_df, aes(x = min_distance_m/1000, y = cum_species)) +
+  geom_line(color = 'black', lwd = .8)+
+  geom_line(data = fit_df, aes(y = fit), color = "blue", linewidth = 1) +
+  geom_vline(data = coef_vals, aes(xintercept = b/1000), lty = 2)+
+  geom_ribbon(data = fit_df, aes(ymin = lower, ymax = upper), 
+              fill = "blue", alpha = 0.2) +
+  theme_classic() +
+#just 'b' to keep it cleaner
+  geom_label(data = coef_vals, 
+            aes(x = 2, y = y, label = paste0(round(b/1000, 2), " km")),
+            hjust = -0.1,
+#creating a white box behind the label to ensure the line never intersects the 'b' stat
+            fill = "white", linewidth = 0, label.padding = unit(0.2, 'lines'), size = 10)+
+  labs(x = "Distance from Spore Trap (m)",
+       y = "Cumulative Species Richness",
+       title = "Taiga")+ #change titles for each ecoregion
+  guides(color = 'none')+
+  scale_x_continuous(limits = c(0,35))+ #fixing axes so any extreme 'b' doesnt change the graph
+  theme(plot.title = element_text(size = 30))
+
+```
